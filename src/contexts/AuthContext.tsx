@@ -1,15 +1,6 @@
 import { createContext, useContext, useEffect, useState, ReactNode } from 'react';
-import { 
-  User,
-  createUserWithEmailAndPassword,
-  signInWithEmailAndPassword,
-  signInWithPopup,
-  GoogleAuthProvider,
-  signOut as firebaseSignOut,
-  onAuthStateChanged
-} from 'firebase/auth';
-import { doc, setDoc, getDoc } from 'firebase/firestore';
-import { auth, db } from '../lib/firebase';
+import { supabase } from '../lib/supabase';
+import type { User } from '@supabase/supabase-js';
 
 interface Profile {
   id: string;
@@ -35,26 +26,44 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    const unsubscribe = onAuthStateChanged(auth, async (user) => {
-      setUser(user);
-      if (user) {
-        await loadProfile(user.uid);
+    // Get initial session
+    supabase.auth.getSession().then(({ data: { session } }) => {
+      setUser(session?.user ?? null);
+      if (session?.user) {
+        loadProfile(session.user.id);
+      } else {
+        setLoading(false);
+      }
+    });
+
+    // Listen for auth changes
+    const {
+      data: { subscription },
+    } = supabase.auth.onAuthStateChange((_event, session) => {
+      setUser(session?.user ?? null);
+      if (session?.user) {
+        loadProfile(session.user.id);
       } else {
         setProfile(null);
         setLoading(false);
       }
     });
 
-    return () => unsubscribe();
+    return () => subscription.unsubscribe();
   }, []);
 
   const loadProfile = async (userId: string) => {
     try {
-      const docRef = doc(db, 'profiles', userId);
-      const docSnap = await getDoc(docRef);
+      const { data, error } = await supabase
+        .from('profiles')
+        .select('*')
+        .eq('id', userId)
+        .single();
 
-      if (docSnap.exists()) {
-        setProfile(docSnap.data() as Profile);
+      if (error) throw error;
+      
+      if (data) {
+        setProfile(data as Profile);
       }
     } catch (error) {
       console.error('Error loading profile:', error);
@@ -65,15 +74,25 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const signUp = async (email: string, password: string, name: string, language: string) => {
     try {
-      const userCredential = await createUserWithEmailAndPassword(auth, email, password);
-      const user = userCredential.user;
-
-      // Create profile in Firestore
-      await setDoc(doc(db, 'profiles', user.uid), {
-        id: user.uid,
-        name,
-        preferred_language: language,
+      const { data, error } = await supabase.auth.signUp({
+        email,
+        password,
       });
+
+      if (error) throw error;
+
+      // Create profile in database
+      if (data.user) {
+        const { error: profileError } = await supabase
+          .from('profiles')
+          .insert({
+            id: data.user.id,
+            name,
+            preferred_language: language,
+          });
+
+        if (profileError) throw profileError;
+      }
 
       return { error: null };
     } catch (error) {
@@ -83,7 +102,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const signIn = async (email: string, password: string) => {
     try {
-      await signInWithEmailAndPassword(auth, email, password);
+      const { error } = await supabase.auth.signInWithPassword({
+        email,
+        password,
+      });
+
+      if (error) throw error;
+
       return { error: null };
     } catch (error) {
       return { error: error as Error };
@@ -92,21 +117,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const googleSignIn = async () => {
     try {
-      const provider = new GoogleAuthProvider();
-      const result = await signInWithPopup(auth, provider);
-      const user = result.user;
+      const { data, error } = await supabase.auth.signInWithOAuth({
+        provider: 'google',
+        options: {
+          redirectTo: `${window.location.origin}`,
+        },
+      });
 
-      // Check if profile exists, if not create one with default values
-      const docRef = doc(db, 'profiles', user.uid);
-      const docSnap = await getDoc(docRef);
-
-      if (!docSnap.exists()) {
-        await setDoc(docRef, {
-          id: user.uid,
-          name: user.displayName || 'User',
-          preferred_language: 'en',
-        });
-      }
+      if (error) throw error;
 
       return { error: null };
     } catch (error) {
@@ -115,7 +133,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   };
 
   const signOut = async () => {
-    await firebaseSignOut(auth);
+    await supabase.auth.signOut();
   };
 
   return (
